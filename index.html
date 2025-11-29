@@ -1,0 +1,684 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Brain, RotateCcw, Zap, User, Trophy } from 'lucide-react';
+
+// --- CẤU HÌNH & HẰNG SỐ ---
+const SUITS = ['spades', 'clubs', 'diamonds', 'hearts'];
+// Rank index: 3=0, 4=1, ..., A=11, 2=12. 3 Bích có value = 0 (rank 0, suit 0)
+const RANKS = ['3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A', '2'];
+const SUIT_SYMBOLS = { spades: '♠', clubs: '♣', diamonds: '♦', hearts: '♥' };
+
+// Giá trị tuyệt đối của lá bài
+const getCardValue = (rankIdx, suitIdx) => rankIdx * 4 + suitIdx;
+
+// --- LOGIC XỬ LÝ BỘ BÀI (CORE) ---
+
+const createDeck = () => {
+  const deck = [];
+  RANKS.forEach((rank, rIdx) => {
+    SUITS.forEach((suit, sIdx) => {
+      deck.push({
+        id: `${rank}-${suit}`,
+        rank,
+        suit,
+        rankIdx: rIdx,
+        suitIdx: sIdx,
+        value: getCardValue(rIdx, sIdx),
+        isSelected: false
+      });
+    });
+  });
+  return deck;
+};
+
+// Hàm xáo trộn ngẫu nhiên (Fisher-Yates shuffle algorithm)
+const shuffleDeck = (deck) => [...deck].sort(() => Math.random() - 0.5);
+
+// Helper: Kiểm tra liên tiếp rank index
+const isConsecutive = (rankIndices) => {
+  for (let i = 0; i < rankIndices.length - 1; i++) {
+    if (rankIndices[i + 1] !== rankIndices[i] + 1) return false;
+  }
+  return true;
+};
+
+// Hàm quan trọng: Xác định loại bài người chơi chọn
+const getCombinationType = (cards) => {
+  if (!cards || cards.length === 0) return null;
+  
+  const sorted = [...cards].sort((a, b) => a.value - b.value);
+  const len = sorted.length;
+  const maxCard = sorted[len - 1]; 
+
+  if (len === 1) return { type: 'single', value: maxCard.value, len: 1, highest: maxCard };
+
+  const uniqueRanks = Array.from(new Set(sorted.map(c => c.rankIdx)));
+  
+  // Các bộ đồng hạng (Đôi, Ba, Tứ quý)
+  if (uniqueRanks.length === 1) {
+    if (len === 2) return { type: 'pair', value: maxCard.value, len: 2, highest: maxCard };
+    if (len === 3) return { type: 'triple', value: maxCard.value, len: 3, highest: maxCard };
+    if (len === 4) return { type: 'four', value: maxCard.value, len: 4, highest: maxCard };
+    return null;
+  }
+
+  // SẢNH (Straight) - 3 lá trở lên, liên tiếp, KHÔNG CHỨA 2 (Heo)
+  if (len >= 3) {
+    if (!sorted.some(c => c.rankIdx === 12)) {
+        // Phải là các rank liên tiếp và số lượng card đúng bằng số rank duy nhất
+        if (uniqueRanks.length === len && isConsecutive(uniqueRanks)) {
+            return { type: 'straight', value: maxCard.value, len: len, highest: maxCard };
+        }
+    }
+  }
+
+  // ĐÔI THÔNG (Pine Pairs)
+  if (len >= 6 && len % 2 === 0 && !sorted.some(c => c.rankIdx === 12)) {
+      const numPairs = len / 2;
+      const rankCounts = {};
+      sorted.forEach(c => rankCounts[c.rankIdx] = (rankCounts[c.rankIdx] || 0) + 1);
+      
+      // Kiểm tra tất cả phải là đôi (đúng 2 lá)
+      if (Object.values(rankCounts).some(count => count !== 2)) return null;
+
+      // Lấy rank của các đôi
+      const pairRanks = uniqueRanks.filter(r => rankCounts[r] === 2).sort((a, b) => a - b);
+      
+      // Kiểm tra liên tiếp rank của các đôi
+      if (pairRanks.length === numPairs && isConsecutive(pairRanks)) {
+          if (numPairs === 3) return { type: '3-pine', value: maxCard.value, len: 6, highest: maxCard };
+          if (numPairs === 4) return { type: '4-pine', value: maxCard.value, len: 8, highest: maxCard };
+      }
+  }
+
+  return null; // Không hợp lệ
+};
+
+// Logic so bài: Bài A có chặt được Bài B (trên bàn) không?
+const canBeat = (myCards, boardState) => {
+    const myComb = getCombinationType(myCards);
+    if (!myComb) return false; 
+
+    if (!boardState || boardState.cards.length === 0) return true;
+
+    const boardComb = getCombinationType(boardState.cards);
+    if (!boardComb) return false; 
+
+    // CÙNG LOẠI
+    if (myComb.type === boardComb.type && myComb.len === boardComb.len) {
+        return myComb.value > boardComb.value;
+    }
+
+    // LUẬT CHẶT
+    const boardIsPig = boardComb.type === 'single' && boardComb.highest.rankIdx === 12; 
+    const boardIsPigPair = boardComb.type === 'pair' && boardComb.highest.rankIdx === 12; 
+
+    // 3 Đôi thông chặt 1 Heo
+    if (myComb.type === '3-pine' && boardIsPig) return true;
+
+    // Tứ quý chặt Heo, Đôi Heo, 3 Đôi thông
+    if (myComb.type === 'four') {
+        if (boardIsPig || boardIsPigPair || boardComb.type === '3-pine') return true;
+    }
+
+    // 4 Đôi thông chặt Heo, Đôi Heo, 3 Đôi thông, Tứ quý
+    if (myComb.type === '4-pine') {
+         if (boardIsPig || boardIsPigPair || boardComb.type === '3-pine' || boardComb.type === 'four') return true;
+    }
+
+    return false;
+};
+
+// --- COMPONENT CHÍNH ---
+
+export default function TienLenGeminiPro() {
+  const [playerHand, setPlayerHand] = useState([]);
+  const [aiHand, setAiHand] = useState([]);
+  const [board, setBoard] = useState({ cards: [], owner: null });
+  const [turn, setTurn] = useState(null); 
+  const [gameStatus, setGameStatus] = useState('start'); 
+  const [winner, setWinner] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [lastPass, setLastPass] = useState(null); 
+
+  const logRef = useRef(null);
+
+  useEffect(() => {
+     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [logs]);
+
+  // --- HÀNH ĐỘNG GAME ---
+
+  const startGame = () => {
+    // 1. Reset trạng thái và chuyển sang 'dealing'
+    setGameStatus('dealing');
+    setPlayerHand([]); 
+    setAiHand([]);
+    setBoard({ cards: [], owner: null });
+    setWinner(null);
+    setLogs([{ type: 'sys', text: "Đã xáo trộn bộ bài. Bắt đầu chia bài..." }]);
+    setLastPass(null);
+
+    // 2. Mô phỏng độ trễ khi chia bài (1.5 giây)
+    setTimeout(() => {
+        // Thuật toán chia bài: Xáo trộn và chia 13 lá cho mỗi người
+        const newDeck = shuffleDeck(createDeck());
+        const pHand = newDeck.slice(0, 13).sort((a, b) => a.value - b.value); 
+        const aHand = newDeck.slice(13, 26).sort((a, b) => a.value - b.value); 
+
+        setPlayerHand(pHand);
+        setAiHand(aHand);
+        
+        // Xác định người đi trước (người có 3 Bích)
+        const pHas3Spades = pHand.some(c => c.value === 0);
+        const starter = pHas3Spades ? 'player' : 'ai';
+        setTurn(starter);
+        
+        // 3. Chuyển sang trạng thái 'playing'
+        setGameStatus('playing');
+        
+        if (starter === 'ai') {
+            addLog('sys', 'AI đi trước (có 3♠)');
+        } else {
+            addLog('sys', 'Bạn đi trước (có 3♠)');
+        }
+    }, 1500); 
+  };
+
+  const addLog = (type, text) => {
+      setLogs(prev => [...prev, { type, text, time: new Date().toLocaleTimeString().slice(0,5) }]);
+  };
+
+  const getCombName = (comb) => {
+      if (!comb) return 'Bộ không hợp lệ';
+      const rank = comb.highest.rank;
+      const suit = SUIT_SYMBOLS[comb.highest.suit];
+      switch (comb.type) {
+          case 'single': return `Lẻ ${rank}${suit}`;
+          case 'pair': return `Đôi ${rank}`;
+          case 'triple': return `Ba cây ${rank}`;
+          case 'four': return `Tứ quý ${rank}`;
+          case 'straight': return `Sảnh ${comb.len} cây (tới ${rank})`;
+          case '3-pine': return `3 Đôi thông (tới ${rank})`;
+          case '4-pine': return `4 Đôi thông (tới ${rank})`;
+          default: return 'Bộ Bài';
+      }
+  };
+
+  // --- PLAYER ACTIONS ---
+
+  const handleCardClick = (id) => {
+      if (gameStatus !== 'playing') return;
+      setPlayerHand(prev => prev.map(c => c.id === id ? { ...c, isSelected: !c.isSelected } : c));
+  };
+
+  const onPlayerPlay = () => {
+      const selected = playerHand.filter(c => c.isSelected);
+      if (selected.length === 0) return;
+      if (turn !== 'player') return;
+      
+      let currentBoard = board;
+      // Nếu AI bỏ lượt và vòng bài thuộc về mình, reset board
+      if (lastPass === 'ai' && board.owner === 'player') {
+          currentBoard = { cards: [], owner: null }; 
+      }
+      
+      const isAbsoluteFirstTurn = board.cards.length === 0 && turn === 'player';
+      const hasThreeSpades = playerHand.some(c => c.value === 0);
+      
+      // Kiểm tra luật 3 Bích
+      if (isAbsoluteFirstTurn && hasThreeSpades && !selected.some(c => c.value === 0)) {
+          console.error("Lượt đi đầu tiên, bạn phải đánh quân 3 Bích!");
+          return;
+      }
+
+      if (!canBeat(selected, currentBoard)) {
+          const myType = getCombinationType(selected);
+          if (!myType) {
+              console.error("Bộ bài không hợp lệ (Không phải lẻ, đôi, sảnh, hay hàng).");
+          } else {
+              console.error("Bài không chặt được bài trên bàn!");
+          }
+          return;
+      }
+
+      const newHand = playerHand.filter(c => !c.isSelected);
+      setPlayerHand(newHand.map(c => ({...c, isSelected: false}))); 
+      setBoard({ cards: selected, owner: 'player' });
+      setTurn('ai');
+      setLastPass(null); 
+      
+      const comb = getCombinationType(selected);
+      addLog('player', `Bạn đánh: ${getCombName(comb)}`);
+
+      if (newHand.length === 0) endGame('player');
+  };
+
+  const onPlayerPass = () => {
+      if (turn !== 'player') return;
+      if (board.cards.length === 0 || (board.owner === 'player' && lastPass === 'ai')) {
+          console.error("Bạn đang cầm vòng, không thể bỏ lượt!");
+          return;
+      }
+      addLog('player', 'Bạn bỏ lượt');
+      setLastPass('player');
+      setTurn('ai');
+  };
+
+  // --- AI LOGIC (GEMINI BRAIN) ---
+
+  useEffect(() => {
+      if (turn === 'ai' && gameStatus === 'playing') {
+          const timer = setTimeout(() => runAITurn(), 1500); 
+          return () => clearTimeout(timer);
+      }
+  }, [turn, gameStatus, aiHand, board, lastPass]); // eslint-disable-line
+
+  const runAITurn = () => {
+      let move = null;
+      let reason = "";
+
+      const aiPlayable = analyzeHand(aiHand);
+      
+      // Danh sách các bộ bài AI có thể đánh, ưu tiên từ mạnh/dài nhất đến yếu nhất.
+      let allCombos = [
+          ...aiPlayable['4-pine'],
+          ...aiPlayable['3-pine'],
+          ...aiPlayable.straights,
+          ...aiPlayable.triples,
+          ...aiPlayable.pairs,
+          ...aiPlayable.singles,
+          ...aiPlayable.fours // Tứ quý giữ riêng, chỉ dùng để chặt hoặc đi tự do cuối cùng
+      ];
+      
+      // Sắp xếp: Ưu tiên bộ dài hơn, sau đó là bộ có giá trị nhỏ nhất (để tống bài rác)
+      allCombos.sort((a, b) => {
+          if (b.len !== a.len) return b.len - a.len; 
+          return a.value - b.value; 
+      });
+
+      const isAbsoluteFirstTurn = board.cards.length === 0 && aiHand.some(c => c.value === 0); 
+      let isFreeTurn = board.cards.length === 0 || (lastPass === 'player' && board.owner === 'ai'); 
+      
+      // -----------------------------------------------------------
+      // I. Xử lý lượt đi đầu tiên của VÁN BÀI (BẮT BUỘC ĐÁNH 3 BÍCH)
+      // -----------------------------------------------------------
+      if (isAbsoluteFirstTurn) { 
+          const threeSpades = aiHand.find(c => c.value === 0);
+
+          // 1. Tìm bộ bài tốt nhất có chứa 3♠
+          const startingCombos = allCombos
+              .filter(c => c.cards.some(card => card.value === 0))
+              .sort((a, b) => {
+                  if (b.cards.length !== a.cards.length) return b.cards.length - a.cards.length; 
+                  return a.value - b.value; // Ưu tiên bộ nhỏ hơn (rác hơn)
+              });
+
+          if (startingCombos.length > 0) {
+              move = startingCombos[0].cards;
+              reason = `Mở đầu bắt buộc: Đánh 3♠ trong bộ ${startingCombos[0].type} tốt nhất.`;
+          } else {
+              // 2. Nếu không có bộ nào, đánh 3♠ lẻ
+              move = [threeSpades];
+              reason = "Mở đầu bắt buộc: Đánh quân 3♠ lẻ.";
+          }
+      // -----------------------------------------------------------
+      // II. Xử lý các lượt cầm vòng sau (Đánh bộ mạnh nhất/dài nhất có thể)
+      // -----------------------------------------------------------
+      } else if (isFreeTurn) { 
+          // Chỉ cần lấy bộ đầu tiên đã được sắp xếp (dài nhất, nhỏ nhất)
+          const bestFreeMove = allCombos[0];
+          
+          if (bestFreeMove) {
+              move = bestFreeMove.cards;
+              reason = `Cầm vòng: Đánh bộ ${bestFreeMove.type} dài/nhỏ nhất.`;
+          } else {
+              // Fallback: nếu không có bộ nào hợp lệ (rất hiếm)
+              move = [aiHand[0]];
+              reason = "Cầm vòng: Đánh quân lẻ nhỏ nhất (Fallback).";
+          }
+      // -----------------------------------------------------------
+      // III. Xử lý chặt bài (Block opponent)
+      // -----------------------------------------------------------
+      } else {
+          const boardComb = getCombinationType(board.cards);
+          
+          // 1. Tìm bộ cùng loại lớn hơn
+          const candidates = allCombos.filter(c => canBeat(c.cards, board));
+          if (candidates.length > 0) {
+              // Lấy bộ nhỏ nhất trong số các bộ có thể chặt
+              move = candidates[0].cards; 
+              reason = `Chặn đối thủ bằng bộ ${getCombinationType(move).type} nhỏ nhất.`;
+          }
+          
+          // 2. Kiểm tra chặt hàng (chặt Heo, Đôi Heo, Tứ Quý)
+          if (!move) {
+              // Kết hợp tất cả Tứ quý và 4 Đôi thông (ưu tiên 4 đôi thông, rồi tứ quý nhỏ)
+              const cuttingCombos = [...aiPlayable['4-pine'], ...aiPlayable.fours].sort((a,b) => a.value - b.value); 
+              
+              for (const combo of cuttingCombos) {
+                  if (canBeat(combo.cards, board)) {
+                      move = combo.cards;
+                      reason = `${combo.type === 'four' ? 'Tứ quý' : '4 Đôi thông'} chặt bài trên bàn!`;
+                      break;
+                  }
+              }
+          }
+          // Thêm 3 Đôi thông chặt Heo
+          if (!move && boardComb.type === 'single' && boardComb.highest.rankIdx === 12) {
+              const pine3 = aiPlayable['3-pine'].sort((a,b) => a.value - b.value);
+              if(pine3.length > 0) {
+                  move = pine3[0].cards;
+                  reason = "3 Đôi thông chặt Heo!";
+              }
+          }
+      }
+
+      // Thực thi
+      if (move) {
+          const comb = getCombinationType(move);
+          setBoard({ cards: move, owner: 'ai' });
+          const newHand = aiHand.filter(c => !move.includes(c));
+          setAiHand(newHand);
+          setTurn('player');
+          setLastPass(null);
+          addLog('ai', `AI đánh: ${getCombName(comb)} (${reason})`);
+          if (newHand.length === 0) endGame('ai');
+      } else {
+          setLastPass('ai');
+          setTurn('player');
+          addLog('ai', 'AI bỏ lượt. Bài không đủ mạnh để chặn.');
+      }
+  };
+
+  // Helper AI: Phân loại bài trong tay (Đã chỉnh sửa để lấy đủ các bộ)
+  const analyzeHand = (hand) => {
+      const rankCounts = {};
+      hand.forEach(c => rankCounts[c.rankIdx] = (rankCounts[c.rankIdx] || 0) + 1);
+
+      const singles = [];
+      const pairs = [];
+      const triples = [];
+      const fours = [];
+      const straights = [];
+      const pine3 = [];
+      const pine4 = [];
+
+      // 1. Đồng hạng (Singles, Pairs, Triples, Fours)
+      const uniqueRanks = Object.keys(rankCounts).map(Number).sort((a, b) => a - b);
+      uniqueRanks.forEach(r => {
+          const cards = hand.filter(c => c.rankIdx === r).sort((a, b) => a.value - b.value);
+          if (rankCounts[r] === 1) singles.push({ cards, type: 'single', len: 1, value: cards[0].value });
+          if (rankCounts[r] === 2) pairs.push({ cards, type: 'pair', len: 2, value: cards[1].value });
+          if (rankCounts[r] === 3) triples.push({ cards, type: 'triple', len: 3, value: cards[2].value });
+          if (rankCounts[r] === 4) fours.push({ cards, type: 'four', len: 4, value: cards[3].value });
+      });
+
+      // 2. Sảnh (Straights)
+      const nonPigRanks = uniqueRanks.filter(r => r < 12).sort((a, b) => a - b);
+      for (let length = 3; length <= nonPigRanks.length; length++) {
+          for (let i = 0; i <= nonPigRanks.length - length; i++) {
+              const currentRanks = nonPigRanks.slice(i, i + length);
+              if (isConsecutive(currentRanks)) {
+                  // Lấy các lá bài tương ứng
+                  const sCards = hand.filter(c => currentRanks.includes(c.rankIdx)).sort((a, b) => a.value - b.value);
+                  // Đảm bảo không bị trùng lặp bộ (ví dụ 3-4-5 và 3-4-5-6)
+                  if (sCards.length === currentRanks.length) {
+                       const isSubset = straights.some(s => s.cards.length >= sCards.length && sCards.every(sc => s.cards.some(c => c.id === sc.id)));
+                       if (!isSubset) {
+                           straights.push({ 
+                              cards: sCards, 
+                              type: 'straight', 
+                              len: sCards.length, 
+                              value: sCards[sCards.length - 1].value 
+                          });
+                      }
+                  }
+              }
+          }
+      }
+      // Loại bỏ các bộ sảnh ngắn hơn đã nằm trong bộ sảnh dài hơn
+      const finalStraights = straights.filter(s1 => 
+          !straights.some(s2 => s2.len > s1.len && s1.cards.every(c1 => s2.cards.some(c2 => c1.id === c2.id)))
+      );
+      finalStraights.sort((a, b) => b.len - a.len || a.value - b.value);
+
+      // 3. Đôi thông (Pine Pairs)
+      const sortedPairs = pairs.sort((a, b) => a.cards[0].rankIdx - b.cards[0].rankIdx);
+
+      // 3-pine (3 đôi thông)
+      for (let i = 0; i <= sortedPairs.length - 3; i++) {
+          const ranks = [sortedPairs[i], sortedPairs[i+1], sortedPairs[i+2]].map(p => p.cards[0].rankIdx);
+          if (isConsecutive(ranks) && ranks[2] < 12) { // Ranks[2] là rank cao nhất
+              pine3.push({ 
+                  cards: [...sortedPairs[i].cards, ...sortedPairs[i+1].cards, ...sortedPairs[i+2].cards], 
+                  type: '3-pine', 
+                  len: 6,
+                  value: sortedPairs[i+2].cards[1].value 
+              });
+          }
+      }
+
+      // 4-pine (4 đôi thông)
+      for (let i = 0; i <= sortedPairs.length - 4; i++) {
+          const ranks = [sortedPairs[i], sortedPairs[i+1], sortedPairs[i+2], sortedPairs[i+3]].map(p => p.cards[0].rankIdx);
+          if (isConsecutive(ranks) && ranks[3] < 12) { 
+              pine4.push({ 
+                  cards: [...sortedPairs[i].cards, ...sortedPairs[i+1].cards, ...sortedPairs[i+2].cards, ...sortedPairs[i+3].cards], 
+                  type: '4-pine', 
+                  len: 8,
+                  value: sortedPairs[i+3].cards[1].value
+              });
+          }
+      }
+      
+      // Sort pine pairs by value (smallest first)
+      pine3.sort((a,b) => a.value - b.value);
+      pine4.sort((a,b) => a.value - b.value);
+
+      return { singles, pairs, triples, fours, straights: finalStraights, '3-pine': pine3, '4-pine': pine4 };
+  };
+
+
+  const endGame = (who) => {
+      setGameStatus('end');
+      setWinner(who);
+  };
+
+  // --- RENDER ---
+  
+  return (
+    <div className="flex flex-col h-screen bg-green-900 text-white font-sans overflow-hidden">
+        
+        {/* TOP BAR: AI HAND & INFO */}
+        <div className="flex-none p-2 bg-green-950/50 flex justify-between items-start z-10">
+            <div className="flex flex-col items-start w-1/3">
+                 <div className="flex items-center gap-2 mb-2">
+                    <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center border-2 border-white shadow-lg">
+                        <Brain size={16} />
+                    </div>
+                    <div>
+                        <div className="font-bold text-xs">Gemini AI</div>
+                        {/* Chỉ hiển thị số lá bài khi đang chơi */}
+                        <div className="text-xs text-green-300">
+                             {gameStatus === 'playing' ? `${aiHand.length} lá` : 'Sẵn sàng'}
+                        </div>
+                    </div>
+                 </div>
+                 {/* Mini Hand View for AI (Hidden cards) */}
+                 <div className="flex pl-4 scale-75 origin-top-left -space-x-4">
+                     {aiHand.map((c, i) => (
+                         <div key={i} className="w-10 h-14 bg-blue-900 rounded border border-white/30 shadow-md" />
+                     ))}
+                 </div>
+            </div>
+
+            {/* AI LOGS */}
+            <div className="w-2/3 h-24 overflow-y-auto text-xs bg-black/40 rounded p-2 font-mono custom-scrollbar" ref={logRef}>
+                {logs.map((l, i) => (
+                    <div key={i} className={`mb-1 ${
+                        l.type === 'ai' ? 'text-yellow-300' : 
+                        l.type === 'player' ? 'text-green-300' : 'text-gray-400'
+                    }`}>
+                        <span className="opacity-50">[{l.time}]</span> {l.text}
+                    </div>
+                ))}
+            </div>
+        </div>
+
+        {/* MIDDLE: BOARD AREA */}
+        <div className="flex-1 relative flex items-center justify-center pt-8 pb-10"> 
+            {/* Center Board */}
+            <div className="relative w-full max-w-2xl h-48 flex items-center justify-center">
+                {board.cards.length > 0 ? (
+                    <div className="relative">
+                         <div className="text-center text-xs uppercase font-bold tracking-widest text-yellow-500/80 mb-4 animate-pulse">
+                             {board.owner === 'ai' ? 'AI vừa đánh' : 'Bạn vừa đánh'}
+                         </div>
+                         <div className="flex justify-center -space-x-8 sm:-space-x-12">
+                            {board.cards.map((c, i) => (
+                                <CardView key={c.id} card={c} isPlayed={true} style={{ transform: `rotate(${(i - board.cards.length/2) * 5}deg) translateY(${Math.abs(i - board.cards.length/2) * -5}px)` }} />
+                            ))}
+                         </div>
+                    </div>
+                ) : (
+                    <div className="text-green-500/30 font-bold text-xl uppercase tracking-widest">
+                        {gameStatus === 'dealing' ? 'ĐANG CHIA BÀI...' : 
+                         gameStatus === 'start' ? 'SẴN SÀNG CHƠI' : 'BÀN TRỐNG'}
+                    </div>
+                )}
+            </div>
+
+            {/* Turn Indicator */}
+            {gameStatus === 'playing' && (
+                <div className={`absolute top-0 left-1/2 transform -translate-x-1/2 px-4 py-1 rounded-full text-sm font-bold shadow-lg flex items-center gap-2 transition-all ${
+                    turn === 'player' ? 'bg-yellow-500 text-black scale-110' : 'bg-gray-800 text-gray-400'
+                }`}>
+                    {turn === 'player' ? <><User size={14}/> Lượt của bạn</> : <><Brain size={14}/> AI đang nghĩ...</>}
+                </div>
+            )}
+            
+            {/* GAME OVER MODAL */}
+            {gameStatus === 'end' && (
+                <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+                    <div className="bg-white text-gray-900 rounded-xl p-6 max-w-sm w-full text-center shadow-2xl animate-bounce-in">
+                        <div className="text-5xl mb-4">{winner === 'player' ? '🏆' : '🤖'}</div>
+                        <h2 className={`text-2xl font-bold mb-2 ${winner === 'player' ? 'text-green-600' : 'text-red-600'}`}>
+                            {winner === 'player' ? 'BẠN THẮNG RỒI!' : 'AI THẮNG!'}
+                        </h2>
+                        <button onClick={startGame} className="w-full bg-blue-600 text-white font-bold py-3 rounded-lg shadow-lg hover:bg-blue-500 flex items-center justify-center gap-2 mt-4">
+                            <RotateCcw size={18}/> Chơi Lại
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
+
+        {/* BOTTOM: PLAYER CONTROLS & HAND (Z-index cao để không bị che) */}
+        <div className="flex-none bg-gradient-to-t from-black/90 to-transparent pb-4 pt-10 relative z-20"> 
+            {/* Controls */}
+            {gameStatus === 'playing' && (
+                <div className="flex justify-center gap-4 mb-4">
+                    <button 
+                        onClick={onPlayerPass}
+                        disabled={turn !== 'player'}
+                        className={`px-6 py-3 rounded-full font-bold text-sm shadow-lg backdrop-blur-sm border transition-all transform active:scale-95 ${
+                            turn === 'player' ? 'bg-red-500/20 border-red-500 text-red-100 hover:bg-red-500 hover:text-white' : 'opacity-50 bg-gray-600 border-gray-500 cursor-not-allowed'
+                        }`}
+                    >
+                        Bỏ lượt
+                    </button>
+                    <button 
+                        onClick={onPlayerPlay}
+                        disabled={turn !== 'player'}
+                        className={`px-8 py-3 rounded-full font-bold text-sm shadow-lg backdrop-blur-sm border transition-all transform active:scale-95 flex items-center gap-2 ${
+                            turn === 'player' ? 'bg-yellow-500 text-black border-yellow-400 hover:scale-105' : 'opacity-50 bg-gray-600 border-gray-500 cursor-not-allowed'
+                        }`}
+                    >
+                        <Zap size={16} fill="black" /> ĐÁNH
+                    </button>
+                </div>
+            )}
+            
+            {/* Nút Bắt đầu/Chơi Lại (chỉ hiển thị khi không phải trạng thái 'playing' hoặc 'end') */}
+            {gameStatus !== 'playing' && gameStatus !== 'end' && (
+                <div className="flex justify-center mb-8">
+                    <button 
+                        onClick={startGame} 
+                        disabled={gameStatus === 'dealing'} // Vô hiệu hóa nút khi đang chia bài
+                        className={`px-8 py-3 rounded-full font-bold shadow-lg flex items-center gap-2 transition-all 
+                            ${gameStatus === 'dealing' 
+                                ? 'bg-gray-500 text-gray-300 cursor-not-allowed' 
+                                : 'bg-blue-600 text-white hover:bg-blue-500 animate-pulse'
+                            }`}
+                    >
+                        {gameStatus === 'dealing' 
+                            ? 'Đang Chia Bài...' 
+                            : <><Trophy size={18}/> Bắt Đầu Ván Mới</>
+                        }
+                    </button>
+                </div>
+            )}
+
+            {/* Hand (Fan Style) */}
+            <div className="relative h-40 sm:h-48 flex justify-center items-end px-2 overflow-hidden"> 
+                {/* Dùng -space-x-16 (4rem overlap) cho mobile và giảm góc xoay */}
+                <div className="flex items-end -space-x-16 sm:-space-x-16 mb-2 px-8 overflow-visible"> 
+                    {playerHand.map((c, i) => (
+                        <div key={c.id} 
+                             className="transform transition-all duration-200 hover:z-20 origin-bottom"
+                             style={{ 
+                                 zIndex: i,
+                                 // Góc xoay 1.5deg để thu hẹp độ xoè
+                                 transform: c.isSelected 
+                                    ? `translateY(-30px) rotate(${(i - playerHand.length/2) * 1.5}deg)` 
+                                    : `rotate(${(i - playerHand.length/2) * 1.5}deg)` 
+                             }}
+                        >
+                            <CardView card={c} onClick={() => handleCardClick(c.id)} />
+                        </div>
+                    ))}
+                </div>
+            </div>
+        </div>
+
+        <style>{`
+            .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+            .custom-scrollbar::-webkit-scrollbar-thumb { background: #4ade80; border-radius: 4px; }
+        `}</style>
+    </div>
+  );
+}
+
+// --- SUB-COMPONENT: UI LÁ BÀI ---
+const CardView = ({ card, onClick, isPlayed = false, style = {} }) => {
+    const isRed = card.suit === 'hearts' || card.suit === 'diamonds';
+    return (
+        <div 
+            onClick={onClick}
+            style={style}
+            className={`
+                relative bg-white rounded-lg shadow-xl cursor-pointer select-none border-2 border-gray-400
+                flex flex-col justify-between p-1 sm:p-2
+                ${isPlayed ? 'w-16 h-24 sm:w-20 sm:h-28' : 'w-20 h-28 sm:w-24 sm:h-36'} 
+                transition-shadow hover:shadow-2xl hover:border-blue-500
+                ${card.isSelected ? 'ring-4 ring-yellow-400 border-yellow-500 translate-y-[-10px]' : ''}
+                ${isRed ? 'text-red-700' : 'text-gray-900'}
+            `}
+        >
+            <div className={`text-md sm:text-lg font-bold leading-none`}>
+                {card.rank}
+                <div className="text-sm sm:text-base">{SUIT_SYMBOLS[card.suit]}</div>
+            </div>
+            
+            <div className={`absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-3xl sm:text-5xl opacity-80`}>
+                {SUIT_SYMBOLS[card.suit]}
+            </div>
+
+            <div className={`text-md sm:text-lg font-bold leading-none transform rotate-180 self-end`}>
+                {card.rank}
+                <div className="text-sm sm:text-base">{SUIT_SYMBOLS[card.suit]}</div>
+            </div>
+        </div>
+    );
+};
+
